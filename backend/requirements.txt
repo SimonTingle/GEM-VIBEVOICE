@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+python-multipart
+scipy
+numpy
+edge-tts
+# torch and vibevoice are installed manually on the server to ensure CPU/GPU match
