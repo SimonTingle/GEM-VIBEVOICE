@@ -13,7 +13,7 @@ A real-time voice bot using Google Gemini (Brain) and Microsoft VibeVoice (Voice
 ### Step 1: Backend (The Voice)
 1. Go to [Lightning.ai](https://lightning.ai) and create a **CPU Studio** (Free) or **GPU Studio** (Fast).
 2. Open the studio terminal and clone your repo:
-   `git clone https://github.com/YOUR_GITHUB_USER/gemini-vibevoice-bot.git`
+   `git clone https://github.com/SimonTingle/GEM-VIBEVOICE.git`
 3. Go to the backend folder:
    `cd gemini-vibevoice-bot/backend`
 4. Install dependencies:
