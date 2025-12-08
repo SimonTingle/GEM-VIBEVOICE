@@ -76,8 +76,10 @@ async def generate_vibevoice_stream(text):
         try:
             with torch.no_grad():
                 stream = generate_stream_method(text)
-                for chunk in stream:
-                    yield chunk
+                # Linter Fix: Explicitly check if stream exists before looping
+                if stream:
+                    for chunk in stream:
+                        yield chunk
             return # Exit if streaming worked
         except Exception as e:
             logger.warning(f"Streaming generation failed, falling back to batch: {e}")
@@ -88,7 +90,6 @@ async def generate_vibevoice_stream(text):
 
         # --- CRITICAL FIX: Linter-Safe Extraction ---
         # We use getattr() so the linter doesn't complain about "Unknown attribute"
-        # on what it thinks is a LongTensor.
         audio_tensor = None
         
         # Priority 1: Check for object attributes dynamically
