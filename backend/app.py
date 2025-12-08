@@ -68,33 +68,46 @@ async def generate_vibevoice_stream(text):
     if model is None:
         return
 
-    # 1. Attempt Streaming Generation (Simplified)
-    try:
-        if hasattr(model, 'generate_stream') and callable(model.generate_stream):
+    # 1. Attempt Streaming Generation
+    # We use getattr to safely check for the method without angering the linter
+    generate_stream_method = getattr(model, 'generate_stream', None)
+    
+    if generate_stream_method and callable(generate_stream_method):
+        try:
             with torch.no_grad():
-                stream = model.generate_stream(text)
+                stream = generate_stream_method(text)
                 for chunk in stream:
                     yield chunk
-            return
-    except Exception as e:
-        logger.warning(f"Streaming generation failed, falling back to batch: {e}")
+            return # Exit if streaming worked
+        except Exception as e:
+            logger.warning(f"Streaming generation failed, falling back to batch: {e}")
 
     # 2. Batch Generation (Fallback)
     with torch.no_grad():
         output = model.generate(text)
 
-        # --- CRITICAL FIX: Extract Tensor from VibeVoiceGenerationOutput ---
+        # --- CRITICAL FIX: Linter-Safe Extraction ---
+        # We use getattr() so the linter doesn't complain about "Unknown attribute"
+        # on what it thinks is a LongTensor.
         audio_tensor = None
         
-        # Check specific attributes known for VibeVoice/HF outputs
-        if hasattr(output, 'audio'):
-            audio_tensor = output.audio
-        elif hasattr(output, 'waveform'):
-            audio_tensor = output.waveform
-        elif isinstance(output, torch.Tensor):
+        # Priority 1: Check for object attributes dynamically
+        if not audio_tensor:
+            audio_tensor = getattr(output, 'audio', None)
+        
+        if not audio_tensor:
+            audio_tensor = getattr(output, 'waveform', None)
+
+        if not audio_tensor:
+            audio_tensor = getattr(output, 'sequences', None)
+            
+        # Priority 2: Check for Dictionary keys
+        if not audio_tensor and isinstance(output, dict):
+            audio_tensor = output.get('audio', output.get('data'))
+            
+        # Priority 3: If it IS a Tensor (and not an object wrapper), use it directly
+        if not audio_tensor and isinstance(output, torch.Tensor):
             audio_tensor = output
-        elif hasattr(output, 'sequences'):
-            audio_tensor = output.sequences
         
         # Validation
         if audio_tensor is None:
@@ -102,7 +115,12 @@ async def generate_vibevoice_stream(text):
             raise HTTPException(status_code=500, detail="Model output format not recognized")
 
         # Conversion: Tensor -> Numpy -> Wav Bytes
-        audio_data = audio_tensor.cpu().numpy().squeeze()
+        # Ensure we are on CPU before converting
+        if hasattr(audio_tensor, 'cpu'):
+            audio_data = audio_tensor.cpu().numpy().squeeze()
+        else:
+            # Fallback for non-torch arrays
+            audio_data = np.array(audio_tensor).squeeze()
         
         if audio_data.ndim > 1:
             audio_data = audio_data.flatten()
@@ -112,12 +130,14 @@ async def generate_vibevoice_stream(text):
         yield byte_io.getvalue()
 
 async def generate_edgetts_stream(text):
-    """Fallback: Uses Microsoft Edge Cloud TTS (Reverted to original, simpler form)"""
+    """Fallback: Uses Microsoft Edge Cloud TTS"""
     communicate = edge_tts.Communicate(text, "en-US-AriaNeural")
     async for chunk in communicate.stream():
-        # This line might still show a red alert, but it is functionally correct
-        if chunk["type"] == "audio":
-            yield chunk["data"]
+        # Linter Safe Fix: Use .get() to avoid "missing key" warnings
+        if chunk.get("type") == "audio":
+            audio_data = chunk.get("data")
+            if audio_data:
+                yield audio_data
 
 # --- ROUTES ---
 
