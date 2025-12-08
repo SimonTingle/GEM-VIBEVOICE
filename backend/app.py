@@ -1,7 +1,6 @@
 import os
 import io
 import logging
-import asyncio
 import uvicorn
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.responses import StreamingResponse
@@ -21,15 +20,12 @@ except ImportError:
 
 # --- CONFIGURATION ---
 TRY_VIBEVOICE = True
-# VibeVoice Sample Rate is 24 kHz
-VIBEVOICE_SAMPLE_RATE = 24000 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("VoiceServer")
 
 app = FastAPI()
 
-# Allow Vercel to access this server
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -66,34 +62,6 @@ if TRY_VIBEVOICE and TORCH_AVAILABLE:
 else:
     model = None
 
-# --- AUDIO TENSOR EXTRACTION UTILITY ---
-def extract_audio_tensor(output):
-    """
-    Robustly extracts the primary audio tensor from the complex VibeVoice model output.
-    This resolves the persistent 'Attribute "audio" is unknown' errors.
-    """
-    if isinstance(output, torch.Tensor):
-        return output
-    
-    # Try accessing common attributes of Hugging Face/VibeVoice model outputs
-    if hasattr(output, 'audio'):
-        return output.audio
-    if hasattr(output, 'waveform'):
-        return output.waveform
-    if hasattr(output, 'sequences'):
-        return output.sequences
-    if isinstance(output, dict) and 'audio' in output:
-        return output['audio']
-
-    # Final attempt: If the output object is an iterable (like a tuple), try the first item
-    try:
-        if isinstance(output, (list, tuple)) and len(output) > 0 and isinstance(output[0], torch.Tensor):
-            return output[0]
-    except:
-        pass # Ignore errors if not iterable
-        
-    return None
-
 # --- GENERATORS ---
 
 async def generate_vibevoice_stream(text):
@@ -102,44 +70,57 @@ async def generate_vibevoice_stream(text):
     if model is None:
         return
 
-    # Batch Generation (Most reliable path for this integration)
+    # 1. Attempt Streaming Generation
     try:
-        with torch.no_grad():
-            output = model.generate(text)
-            
-            # --- USE THE FIXED EXTRACTION UTILITY ---
-            audio_tensor = extract_audio_tensor(output)
-
-            # Validation and Conversion
-            if audio_tensor is None or not hasattr(audio_tensor, 'cpu'):
-                 logger.error(f"VibeVoice output error: Could not extract tensor. Final type: {type(output)}")
-                 # Raise a 500 Internal Server Error to the client
-                 raise HTTPException(status_code=500, detail="TTS generation failed: Model output format is incompatible.")
-            
-            # Convert to numpy array (moves to CPU and converts)
-            # The squeeze() and numpy() calls are safe only after we ensure it's a tensor.
-            audio_data = audio_tensor.cpu().numpy().squeeze()
-            
-            # Flatten to 1D array if needed (e.g., [1, N] -> [N])
-            if audio_data.ndim > 1:
-                audio_data = audio_data.flatten()
-
-            # Write to a BytesIO object for in-memory WAV conversion
-            byte_io = io.BytesIO()
-            wav.write(byte_io, VIBEVOICE_SAMPLE_RATE, audio_data)
-            
-            yield byte_io.getvalue()
-            
+        if hasattr(model, 'generate_stream') and callable(model.generate_stream):
+            with torch.no_grad():
+                stream = model.generate_stream(text)
+                for chunk in stream:
+                    yield chunk
+            return # Exit if streaming worked
     except Exception as e:
-        logger.error(f"VibeVoice runtime error during generation: {e}")
-        raise HTTPException(status_code=500, detail=f"VibeVoice internal failure: {e}")
+        logger.warning(f"Streaming generation failed, falling back to batch: {e}")
+
+    # 2. Batch Generation (Fallback)
+    with torch.no_grad():
+        output = model.generate(text)
+
+        # Handle complex VibeVoice output objects
+        audio_tensor = None
+        
+        # Check specific attributes known for VibeVoice/HF outputs
+        if hasattr(output, 'audio'):
+            audio_tensor = output.audio
+        elif hasattr(output, 'waveform'):
+            audio_tensor = output.waveform
+        elif hasattr(output, 'sequences'):
+            audio_tensor = output.sequences
+        elif isinstance(output, dict) and 'audio' in output:
+            audio_tensor = output['audio']
+        elif isinstance(output, torch.Tensor):
+            audio_tensor = output
+        
+        # Validation
+        if audio_tensor is None:
+            logger.error(f"Could not extract audio from model output. Type: {type(output)}")
+            raise HTTPException(status_code=500, detail="Model output format not recognized")
+
+        # Conversion: Tensor -> Numpy -> Wav Bytes
+        audio_data = audio_tensor.cpu().numpy().squeeze()
+        
+        if audio_data.ndim > 1:
+            audio_data = audio_data.flatten()
+
+        byte_io = io.BytesIO()
+        wav.write(byte_io, 24000, audio_data) # 24kHz is standard for VibeVoice
+        yield byte_io.getvalue()
 
 async def generate_edgetts_stream(text):
     """Fallback: Uses Microsoft Edge Cloud TTS"""
     communicate = edge_tts.Communicate(text, "en-US-AriaNeural")
     async for chunk in communicate.stream():
-        # This structure is safe and handles the TypedDict warning
-        if chunk.get("type") == "audio" and chunk.get("data"):
+        # Linter fix: explicitly check type and key presence
+        if chunk["type"] == "audio" and "data" in chunk:
             yield chunk["data"]
 
 # --- ROUTES ---
@@ -157,14 +138,12 @@ async def speak(payload: dict = Body(...)):
     logger.info(f"Speaking via {TTS_STRATEGY}: {text[:30]}...")
 
     if model:
-        # If VibeVoice is loaded, use it (assumes WAV output)
         return StreamingResponse(
             generate_vibevoice_stream(text),
             media_type="audio/wav",
             headers={"Cache-Control": "no-cache"}
         )
     else:
-        # Use EdgeTTS fallback (assumes MPEG/MP3 output)
         return StreamingResponse(
             generate_edgetts_stream(text),
             media_type="audio/mpeg",
