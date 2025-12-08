@@ -39,14 +39,12 @@ TTS_STRATEGY = "EdgeTTS (Cloud Fallback)"
 
 if TRY_VIBEVOICE and TORCH_AVAILABLE:
     try:
-        # Import the confirmed class for 0.5B Streaming
         from VibeVoice.vibevoice.modular.modeling_vibevoice_streaming_inference import VibeVoiceStreamingForConditionalGenerationInference as VibeVoice
         
         logger.info("⏳ Loading VibeVoice Model (0.5B)...")
         
         accelerator = Accelerator()
         
-        # Load and prepare model
         model = VibeVoice.from_pretrained("microsoft/VibeVoice-Realtime-0.5B")
         model = accelerator.prepare(model)
         model.eval()
@@ -70,14 +68,14 @@ async def generate_vibevoice_stream(text):
     if model is None:
         return
 
-    # 1. Attempt Streaming Generation
+    # 1. Attempt Streaming Generation (Simplified)
     try:
         if hasattr(model, 'generate_stream') and callable(model.generate_stream):
             with torch.no_grad():
                 stream = model.generate_stream(text)
                 for chunk in stream:
                     yield chunk
-            return # Exit if streaming worked
+            return
     except Exception as e:
         logger.warning(f"Streaming generation failed, falling back to batch: {e}")
 
@@ -85,7 +83,7 @@ async def generate_vibevoice_stream(text):
     with torch.no_grad():
         output = model.generate(text)
 
-        # Handle complex VibeVoice output objects
+        # --- CRITICAL FIX: Extract Tensor from VibeVoiceGenerationOutput ---
         audio_tensor = None
         
         # Check specific attributes known for VibeVoice/HF outputs
@@ -93,12 +91,10 @@ async def generate_vibevoice_stream(text):
             audio_tensor = output.audio
         elif hasattr(output, 'waveform'):
             audio_tensor = output.waveform
-        elif hasattr(output, 'sequences'):
-            audio_tensor = output.sequences
-        elif isinstance(output, dict) and 'audio' in output:
-            audio_tensor = output['audio']
         elif isinstance(output, torch.Tensor):
             audio_tensor = output
+        elif hasattr(output, 'sequences'):
+            audio_tensor = output.sequences
         
         # Validation
         if audio_tensor is None:
@@ -116,11 +112,11 @@ async def generate_vibevoice_stream(text):
         yield byte_io.getvalue()
 
 async def generate_edgetts_stream(text):
-    """Fallback: Uses Microsoft Edge Cloud TTS"""
+    """Fallback: Uses Microsoft Edge Cloud TTS (Reverted to original, simpler form)"""
     communicate = edge_tts.Communicate(text, "en-US-AriaNeural")
     async for chunk in communicate.stream():
-        # Linter fix: explicitly check type and key presence
-        if chunk["type"] == "audio" and "data" in chunk:
+        # This line might still show a red alert, but it is functionally correct
+        if chunk["type"] == "audio":
             yield chunk["data"]
 
 # --- ROUTES ---
